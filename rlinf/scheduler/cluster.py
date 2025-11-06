@@ -147,11 +147,10 @@ class Cluster:
         try:
             # First try to connect to an existing Ray cluster
             ray.init(
-                runtime_env={"_disable_uv_runtime_env_hook": True},
                 address="auto",
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
-                runtime_env={"env_vars": dict(os.environ)},
+                runtime_env={"_disable_uv_runtime_env_hook": True, "env_vars": dict(os.environ)},
             )
         except ConnectionError:
             ray.init(
