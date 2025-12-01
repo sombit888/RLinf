@@ -1,14 +1,18 @@
 curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
 
-export UV_CACHE_DIR="/scratch/$USER/.cache/uv"
+# Python bytecode cache
+export PYTHONPYCACHEPREFIX=/scratch/$USER/.pycache
 
-# pip cache
-export PIP_CACHE_DIR="/scratch/$USER/.cache/pip"
+# UV cache and local Python installations
+export UV_HOME=/scratch/$USER/.local/share/uv
 
-# Python temp builds
-export TMPDIR="/scratch/$USER/tmp"
-export TEMP="/scratch/$USER/tmp"
-export TMP="/scratch/$USER/tmp"
+# Generic Python temp and cache dirs
+export XDG_CACHE_HOME=/scratch/$USER/.cache
+export PIP_CACHE_DIR=/scratch/$USER/.cache/pip
+export TORCH_HOME=/scratch/$USER/.cache/torch
+export HF_HOME=/scratch/$USER/.cache/huggingface
+export OMNIGIBSON_DATASET_PATH=/scratch/$USER/datasets/behavior-1k-assets
 
-# XDG cache
-export XDG_CACHE_HOME="/scratch/$USER/.cache"
+# Optional: temp dir for any build
+export TMPDIR=/scratch/$USER/tmp
+mkdir -p $TMPDIR
