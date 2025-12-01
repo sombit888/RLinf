@@ -17,6 +17,7 @@ export UV_VENV_DIR=/scratch/$USER/.venv
 export UV_HOME=/scratch/$USER/.local/share/uv
 
 # Generic Python temp and cache dirs
+export XDG_DATA_HOME=/scratch/$USER/.local/share  # most important
 export XDG_CACHE_HOME=/scratch/$USER/.cache
 export PIP_CACHE_DIR=/scratch/$USER/.cache/pip
 export TORCH_HOME=/scratch/$USER/.cache/torch
@@ -26,5 +27,6 @@ export OMNIGIBSON_DATASET_PATH=/scratch/$USER/datasets/behavior-1k-assets
 # Optional: temp dir for any build
 export TMPDIR=/scratch/$USER/tmp
 mkdir -p $TMPDIR
+
 bash requirements/install.sh openvla
 
