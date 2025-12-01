@@ -5,6 +5,8 @@ export PYTHONPYCACHEPREFIX=/scratch/$USER/.pycache
 
 # UV cache and local Python installations
 export UV_HOME=/scratch/$USER/.local/share/uv
+export UV_VENV_DIR=/scratch/$USER/.venv
+export UV_HOME=/scratch/$USER/.local/share/uv
 
 # Generic Python temp and cache dirs
 export XDG_CACHE_HOME=/scratch/$USER/.cache
