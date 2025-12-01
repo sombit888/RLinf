@@ -7,3 +7,5 @@
 #SBATCH --mem-per-gpu=64G
 #SBATCH --output=/scratch/sombit_dey/job_%j.out
 #SBATCH --error=/scratch/sombit_dey/job_%j.err
+
+bash slurm_scripts/run_job.sh
