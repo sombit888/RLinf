@@ -1,9 +1,9 @@
 # curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
 
 # make it conditional if uv not installed
-mkdir -p /scratch/$USER/projects/
-cd /scratch/$USER/projects/ && git clone git@github.com:sombit888/RLinf.git
-cd RLinf
+# mkdir -p /scratch/$USER/projects/
+# cd /scratch/$USER/projects/RLinf 
+# cd RLinf && git pull
 if ! command -v uv &> /dev/null
 then
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
