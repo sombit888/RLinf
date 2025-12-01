@@ -32,7 +32,7 @@ if [ "$ENABLE_BEHAVIOR" = "true" ] && [[ "$TARGET" != "openvla-oft" ]]; then
 fi
 
 # Common dependencies
-uv venv --python=$PYTHON_VERSION --home=/scratch/$USER/.local
+uv venv --python=$PYTHON_VERSION
 source .venv/bin/activate
 UV_TORCH_BACKEND=auto uv sync
 
