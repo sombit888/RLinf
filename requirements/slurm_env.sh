@@ -1,6 +1,9 @@
 # curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
 
 # make it conditional if uv not installed
+mkdir -p /scratch/$USER/projects/
+cd /scratch/$USER/projects/ && git clone git@github.com:sombit888/RLinf.git
+cd RLinf
 if ! command -v uv &> /dev/null
 then
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
@@ -23,3 +26,5 @@ export OMNIGIBSON_DATASET_PATH=/scratch/$USER/datasets/behavior-1k-assets
 # Optional: temp dir for any build
 export TMPDIR=/scratch/$USER/tmp
 mkdir -p $TMPDIR
+bash requirements/install.sh openvla
+
