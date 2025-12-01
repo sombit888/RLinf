@@ -1,5 +1,10 @@
-curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
+# curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
 
+# make it conditional if uv not installed
+if ! command -v uv &> /dev/null
+then
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
+fi
 # Python bytecode cache
 export PYTHONPYCACHEPREFIX=/scratch/$USER/.pycache
 
