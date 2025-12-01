@@ -104,7 +104,7 @@ rollout:
     queue_size: 0
   mode: "colocate"
   backend: "huggingface"
-  model_dir: "/path/to/model/openvla-7b-rlvla-warmup/"
+  model_dir: "/scratch/sombit_dey/openvla-7b-rlvla-warmup/"
   precision: ${actor.model.precision}
   gpu_memory_utilization: 0.5
   enforce_eager: True
@@ -119,7 +119,7 @@ actor:
     queue_size: 0
   training_backend: "fsdp"
 
-  checkpoint_load_path: "/path/to/model/openvla-7b-rlvla-warmup/"
+  checkpoint_load_path: "/scratch/sombit_dey/openvla-7b-rlvla-warmup/"
   checkpoint_save_path: "../results"
 
   micro_batch_size: 20
@@ -129,7 +129,7 @@ actor:
 
   tokenizer:
     tokenizer_type: "HuggingFaceTokenizer"
-    tokenizer_model: "/path/to/model/openvla-7b-rlvla-warmup/"
+    tokenizer_model: "/scratch/sombit_dey/openvla-7b-rlvla-warmup/"
     extra_vocab_size: 421
     use_fast: False
     trust_remote_code: True
