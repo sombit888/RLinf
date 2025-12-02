@@ -17,10 +17,11 @@ scratch_dir=/scratch/$USER/projects/RLinf
 cd $scratch_dir
 # check if .venv exists else setup environment
 if [ ! -d "$scratch_dir/.venv" ]; then
-    bash requirements/slurm_env.sh
+    bash requirements/slurm_env.sh ${1:-"openvla"}
     # bash requirements/install.sh openvla
 fi
 source .venv/bin/activate
-bash examples/embodiment/run_embodiment.sh maniskill_ppo_openvla_quickstart
+bash examples/embodiment/run_embodiment.sh maniskill_ppo_openvla_quickstart 
+# bash examples/embodiment/run_embodiment.sh $2 
 
-# bash slurm_scripts/run_job.sh 
+# bash slurm_scripts/run_job.sh ${1:-"openvla"}
