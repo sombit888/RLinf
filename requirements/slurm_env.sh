@@ -27,6 +27,6 @@ export OMNIGIBSON_DATASET_PATH=/scratch/$USER/datasets/behavior-1k-assets
 # Optional: temp dir for any build
 export TMPDIR=/scratch/$USER/tmp
 mkdir -p $TMPDIR
-
 bash requirements/install.sh openvla
+hf download gen-robot/openvla-7b-rlvla-warmup --local-dir /scratch/sombit_dey/openvla-7b-rlvla-warmup/
 

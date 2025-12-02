@@ -72,7 +72,7 @@ elif [ "$TARGET" = "openpi" ]; then
     cp -r .venv/lib/python3.11/site-packages/openpi/models_pytorch/transformers_replace/* \
           .venv/lib/python3.11/site-packages/transformers/
 
-    export TOKENIZER_DIR="$WORK/.cache/openpi/big_vision/"
+    export TOKENIZER_DIR="/scratch/$USER/.cache/openpi/big_vision/"
     mkdir -p "$TOKENIZER_DIR"
     gsutil -m cp -r gs://big_vision/paligemma_tokenizer.model "$TOKENIZER_DIR"
 
