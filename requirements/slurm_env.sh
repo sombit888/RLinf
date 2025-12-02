@@ -7,6 +7,7 @@
 if ! command -v uv &> /dev/null
 then
     curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/scratch/$USER/uv sh
+    source /scratch/$USER/uv/env
 fi
 # Python bytecode cache
 export PYTHONPYCACHEPREFIX=/scratch/$USER/.pycache
