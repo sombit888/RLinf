@@ -31,14 +31,17 @@ from typing import (
 )
 
 import ray
+import ray.dashboard.utils
+import ray.util.state
 import torch
 from omegaconf import OmegaConf
 
-from ..accelerator import Accelerator, AcceleratorType
-from ..cluster import Cluster
+from ..cluster import Cluster, ClusterEnvVar
+from ..hardware import AcceleratorType, AcceleratorUtil, HardwareInfo
 from ..manager import WorkerAddress
 
 if TYPE_CHECKING:
+    from ..manager import WorkerInfo
     from .worker_group import WorkerGroup
 
 WorkerClsType = TypeVar("WorkerClsType")
@@ -311,7 +314,7 @@ class Worker(metaclass=WorkerMeta):
     current_worker = None
     logging.basicConfig()
     logger = logging.getLogger(Cluster.SYS_NAME)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(Cluster.LOGGING_LEVEL)
     torch_platform = torch.cuda
     torch_device_type = "cuda"
 
@@ -319,11 +322,11 @@ class Worker(metaclass=WorkerMeta):
         """Create a new instance of the Worker class."""
         instance = super().__new__(cls)
 
-        node_id = os.environ.get("NODE_ID", None)
+        cluster_node_rank = os.environ.get("CLUSTER_NODE_RANK", None)
 
         # ray.remote initializes the class with the ActorClass wrapper locally first (not in a remote process),
         # which doesn't have the environment variables set.
-        if node_id is not None and "ActorClass(" not in cls.__name__:
+        if cluster_node_rank is not None and "ActorClass(" not in cls.__name__:
             instance._env_setup_before_init()
             # Handle OS signals for better debuggability
             # Ray new the class in main thread but call __init__ in worker thread if it's an Actor with async functions
@@ -343,15 +346,19 @@ class Worker(metaclass=WorkerMeta):
             self._worker_address = WorkerAddress.from_name(self._worker_name)
 
         # These are not required env_vars, but are set by Ray Worker for convenience
-        self._node_id = int(os.environ.get("NODE_ID", -1))
+        self._cluster_node_rank = int(os.environ.get("CLUSTER_NODE_RANK", -1))
         self._accelerator_type = AcceleratorType(
             os.environ.get("ACCELERATOR_TYPE", str(AcceleratorType.NO_ACCEL.value))
         )
-        self._local_accelerator_id = int(os.environ.get("LOCAL_ACCELERATOR_ID", -1))
+        self._local_accelerator_rank = int(os.environ.get("LOCAL_ACCELERATOR_RANK", -1))
         self._node_local_rank = int(os.environ.get("NODE_LOCAL_RANK", -1))
         self._node_local_world_size = int(os.environ.get("NODE_LOCAL_WORLD_SIZE", -1))
-        Worker.torch_device_type = Accelerator.get_device_type(self._accelerator_type)
-        Worker.torch_platform = Accelerator.get_torch_platform(self._accelerator_type)
+        Worker.torch_device_type = AcceleratorUtil.get_device_type(
+            self._accelerator_type
+        )
+        Worker.torch_platform = AcceleratorUtil.get_torch_platform(
+            self._accelerator_type
+        )
         self.torch_device_type = Worker.torch_device_type
         self.torch_platform = Worker.torch_platform
 
@@ -387,13 +394,14 @@ class Worker(metaclass=WorkerMeta):
         else:
             self._is_ray_actor = True
 
-        if self._is_ray_actor and not hasattr(self, "_local_accelerator_id"):
+        if self._is_ray_actor and not hasattr(self, "_local_accelerator_rank"):
             raise RuntimeError(
                 "You may have mistakenly initialized the Worker class directly without `create_group` and `launch`. Please ensure a worker class is not instantiated on the main process directly like `Worker()`, but `Worker.create_group().launch()`."
             )
 
         Worker.PID = os.getpid()
         self._thread = threading.current_thread()
+        self._stacklevel = 4 if self._is_ray_actor else 3
 
         # Reset Cluster.NAMESPACE for this Worker process according to the environment variable
         namespace = os.environ.get("CLUSTER_NAMESPACE", None)
@@ -402,12 +410,26 @@ class Worker(metaclass=WorkerMeta):
         )
         Cluster.NAMESPACE = namespace
 
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            ray.init(
+                address="auto",
+                namespace=Cluster.NAMESPACE,
+                logging_level=Cluster.LOGGING_LEVEL,
+            )
+
         if self._is_ray_actor and parent_address is not None:
             # The Worker is a Ray actor launched inside a Worker
             self._worker_address = parent_address.get_child_address(self._rank)
             self._worker_name = self._worker_address.get_name()
             os.environ["WORKER_NAME"] = self._worker_name
         self._group_name = self._worker_address.get_parent_address().get_name()
+
+        # Initialize global locks
+        from .lock import DeviceLock, PortLock
+
+        self._device_lock = DeviceLock(self)
+        self._port_lock = PortLock(self)
 
         # Setup local rank and world size
         self._setup_local_rank_world_size()
@@ -418,21 +440,24 @@ class Worker(metaclass=WorkerMeta):
         # Configure logging
         self._setup_logging()
 
+        # Setup node group and hardware ranks
+        self._setup_hardware()
+
+        # Setup worker info
+        self._setup_worker_info()
+
         # Init ray and managers
         self._manager_proxy = None
         self._collective = None
-        self._init_ray_and_managers()
+        self._setup_managers()
 
         # Setup MASTER_ADDR and MASTER_PORT
         self._setup_master_address_and_port()
 
+        # Setup communication envs
+        self._setup_comm_envs()
+
         self._lock = threading.Lock()
-        self._stacklevel = 4 if self._is_ray_actor else 3
-
-        from .lock import DeviceLock
-
-        self._device_lock = DeviceLock(self)
-
         Worker.current_worker = self
         self._has_initialized = True
 
@@ -450,6 +475,11 @@ class Worker(metaclass=WorkerMeta):
         return self._worker_address
 
     @property
+    def worker_info(self) -> "WorkerInfo":
+        """Get the WorkerInfo of the worker."""
+        return self._worker_info
+
+    @property
     def manager_proxy(self):
         """Get the SchedulerProxy instance for this worker.
 
@@ -461,6 +491,31 @@ class Worker(metaclass=WorkerMeta):
     def device_lock(self):
         """Get the DeviceLock instance for this worker."""
         return self._device_lock
+
+    @property
+    def hardware_type(self) -> str:
+        """Get the hardware type of the current worker.
+
+        Returns:
+            str: The hardware type of the current worker.
+        """
+        return self._node_group.hardware_type
+
+    @property
+    def hardware_infos(self) -> list[HardwareInfo]:
+        """Get the hardware information of the current worker.
+
+        Returns:
+            list[HardwareInfo]: The list hardware information assigned to the current worker.
+        """
+        infos = []
+        for local_hw_rank in self._local_hardware_ranks:
+            infos.append(
+                self._node_group.get_hardware_infos(self._cluster_node_rank)[
+                    local_hw_rank
+                ]
+            )
+        return infos
 
     @classmethod
     def create_group(
@@ -610,7 +665,7 @@ class Worker(metaclass=WorkerMeta):
     def create_channel(
         self,
         channel_name: str,
-        node_id: int = 0,
+        node_rank: int = 0,
         maxsize: int = 0,
         local: bool = False,
     ):
@@ -618,7 +673,7 @@ class Worker(metaclass=WorkerMeta):
 
         Args:
             channel_name (str): The name of the channel.
-            node_id (int): The global ID of the node in the cluster where the channel will be created.
+            node_rank (int): The global rank of the node in the cluster where the channel will be created.
             maxsize (int): The maximum size of the channel queue. Defaults to 0 (unbounded).
             local (bool): Create the channel for intra-process communication. Cannot be connected by other workers.
 
@@ -629,7 +684,7 @@ class Worker(metaclass=WorkerMeta):
         from ..channel.channel import Channel
 
         return Channel.create(
-            name=channel_name, node_id=node_id, maxsize=maxsize, local=local
+            name=channel_name, node_rank=node_rank, maxsize=maxsize, local=local
         )
 
     def connect_channel(self, channel_name: str):
@@ -681,6 +736,16 @@ class Worker(metaclass=WorkerMeta):
 
         """
         return self._worker_address.get_parent_rank()
+
+    def acquire_free_port(self):
+        """Safely acquire a free port on the current node without causing conflicts within the node."""
+        max_tries = 10000  # Retry up to 10000 times to find a free port
+        for _ in range(max_tries):
+            port = Cluster.find_free_port()
+            success = self._port_lock.acquire(port)
+            if success:
+                return port
+        raise RuntimeError(f"Failed to acquire a free port after {max_tries} attempts.")
 
     def log_on_first_rank(self, msg):
         """Log a message only on the first rank of the worker group."""
@@ -737,6 +802,50 @@ class Worker(metaclass=WorkerMeta):
             duration = time.perf_counter() - start_time
             self._timer_metrics[tag] = self._timer_metrics.get(tag, 0.0) + duration
 
+    @staticmethod
+    def check_worker_alive(worker_name: str) -> bool:
+        """Check if a worker is alive.
+
+        Args:
+            worker_name (str): The name of the worker to check.
+
+        Returns:
+            bool: True if the worker is alive, False otherwise.
+        """
+        try:
+            # Internally, Ray uses HTTP to query the actor states
+            # Set no-proxy for ray address in case HTTP_PROXY is set in the environment
+            ray_address = ray.dashboard.utils.get_address_for_submission_client(None)
+            if "http://" in ray_address:
+                ray_address = ray_address.replace("http://", "")
+            elif "https://" in ray_address:
+                ray_address = ray_address.replace("https://", "")
+            if ":" in ray_address:
+                ray_address = ray_address.split(":")[0]
+            prev_no_proxy_upper = os.environ.get("NO_PROXY", None)
+            prev_no_proxy_lower = os.environ.get("no_proxy", None)
+            os.environ["NO_PROXY"] = ray_address
+            os.environ["no_proxy"] = ray_address
+
+            actors = ray.util.state.list_actors(filters=[("NAME", "=", worker_name)])
+
+            if prev_no_proxy_upper is not None:
+                os.environ["NO_PROXY"] = prev_no_proxy_upper
+            else:
+                os.environ.pop("NO_PROXY", None)
+            if prev_no_proxy_lower is not None:
+                os.environ["no_proxy"] = prev_no_proxy_lower
+            else:
+                os.environ.pop("no_proxy", None)
+
+            if len(actors) == 0:
+                return False
+            actor_info = actors[0]
+            return actor_info.state != "DEAD"
+        except Exception:
+            # Simply treat the worker as alive if any unexpected error occurs during state query
+            return True
+
     def _check_initialized(self):
         """Check if the Worker has been initialized.
 
@@ -747,18 +856,10 @@ class Worker(metaclass=WorkerMeta):
                 "Worker has not been initialized. Please call Worker.__init__(self) in your class's __init__ method."
             )
 
-    def _init_ray_and_managers(self):
+    def _setup_managers(self):
         """When the Worker is not a Ray actor, we need to initialize Ray if it is not already initialized."""
         from ..collective import Collective
         from ..manager import WorkerManager
-
-        if not ray.is_initialized():
-            # Initialize Ray if not already initialized
-            ray.init(
-                address="auto",
-                namespace=Cluster.NAMESPACE,
-                logging_level=Cluster.LOGGING_LEVEL,
-            )
 
         if (
             self._manager_proxy is None
@@ -766,9 +867,7 @@ class Worker(metaclass=WorkerMeta):
             or Worker.PID != os.getpid()
         ):
             self._manager_proxy = WorkerManager.get_proxy()
-            self._manager_proxy.register_worker(
-                self._worker_address, self._get_worker_info()
-            )
+            self._manager_proxy.register_worker(self._worker_address, self._worker_info)
             self._collective = Collective(self)
 
             Worker.PID = os.getpid()
@@ -782,7 +881,7 @@ class Worker(metaclass=WorkerMeta):
                 self._isolate_gpu = True
             else:
                 os.environ["LOCAL_RANK"] = str(
-                    self._local_accelerator_id
+                    self._local_accelerator_rank
                 )  # Must use the actual device ID
                 os.environ["LOCAL_WORLD_SIZE"] = str(self._node_local_world_size)
                 self._isolate_gpu = False
@@ -819,21 +918,63 @@ class Worker(metaclass=WorkerMeta):
 
     def _setup_accelerator_info(self) -> int:
         cluster = Cluster()
-        visible_devices = Accelerator.get_visible_devices(self._accelerator_type)
-        node_accelerator_ids = cluster.node_accelerator_ids[self._node_id]
+        visible_devices = AcceleratorUtil.get_visible_devices(self._accelerator_type)
+        node_accelerator_ranks = cluster.accelerator_ranks[self._cluster_node_rank]
         self.global_accelerator_ids = [
-            node_accelerator_ids[local_id] for local_id in visible_devices
+            node_accelerator_ranks[local_id] for local_id in visible_devices
         ]
 
         if not self._is_ray_actor:
             if len(visible_devices) > 0:
-                self._local_accelerator_id = visible_devices[0]
+                self._local_accelerator_rank = visible_devices[0]
             else:
-                self._local_accelerator_id = -1
+                self._local_accelerator_rank = -1
+
+    def _setup_hardware(self):
+        cluster = Cluster()
+        hardware_ranks_str = os.environ.get("LOCAL_HARDWARE_RANKS", "")
+        if hardware_ranks_str == "":
+            self._local_hardware_ranks = []
+        else:
+            self._local_hardware_ranks = list(
+                map(int, hardware_ranks_str.strip().split(","))
+            )
+        node_group_label = os.environ.get("NODE_GROUP_LABEL", None)
+        self._node_group = cluster.get_node_group(node_group_label)
+        assert self._node_group is not None, (
+            f"Node group {node_group_label} not found in cluster. Available node groups: {[node_group.label for node_group in cluster._node_groups]}"
+        )
+
+    def _setup_comm_envs(self):
+        # Communication devices
+        self._comm_devices = Cluster.get_sys_env_var(
+            ClusterEnvVar.COMM_NET_DEVICES, None
+        )
+        if self._comm_devices is not None:
+            self.log_info(
+                f"Using communication devices for worker {self._worker_name}: {self._comm_devices}"
+            )
+            # Validate the format of comm devices
+            if os.getenv("GLOO_SOCKET_IFNAME") is None:
+                os.environ["GLOO_SOCKET_IFNAME"] = self._comm_devices
+            elif self._comm_devices != os.environ["GLOO_SOCKET_IFNAME"]:
+                self.log_warning(
+                    f"GLOO_SOCKET_IFNAME is already set to {os.environ['GLOO_SOCKET_IFNAME']}, ignoring {Cluster.get_full_env_var_name(ClusterEnvVar.COMM_NET_DEVICES)}={self._comm_devices}"
+                )
+
+            ccl_socket_env_var = AcceleratorUtil.get_ccl_socket_ifname_env_var(
+                self._accelerator_type
+            )
+            if os.environ.get(ccl_socket_env_var) is None:
+                os.environ[ccl_socket_env_var] = self._comm_devices
+            elif self._comm_devices != os.environ[ccl_socket_env_var]:
+                self.log_warning(
+                    f"{ccl_socket_env_var} is already set to {os.environ[ccl_socket_env_var]}, ignoring {Cluster.get_full_env_var_name(ClusterEnvVar.COMM_NET_DEVICES)}={self._comm_devices}"
+                )
 
     def _setup_logging(self):
         self._logger = logging.getLogger(self._worker_name)
-        logging_level = Cluster.get_sys_env_var("LOG_LEVEL", "INFO").upper()
+        logging_level = Cluster.get_sys_env_var(ClusterEnvVar.LOG_LEVEL, "INFO").upper()
         if logging_level == "DEBUG":
             self._logging_level = logging.DEBUG
         elif logging_level == "INFO":
@@ -907,11 +1048,11 @@ class Worker(metaclass=WorkerMeta):
         workers = [self._worker_address, peer_addr]
         # Ensure the order is the same with the same two ranks
         workers = sorted(workers, key=lambda x: x.get_name())
-        self._init_ray_and_managers()
+        self._setup_managers()
         with self._lock:
             return self._collective.create_collective_group(workers)
 
-    def _get_worker_info(self):
+    def _setup_worker_info(self):
         """Get the worker information for local access.
 
         This method is used to retrieve the worker properties without calling remote functions.
@@ -920,17 +1061,18 @@ class Worker(metaclass=WorkerMeta):
             self._actor = ray.get_actor(self._worker_name, namespace=Cluster.NAMESPACE)
 
         node_ip = ray.util.get_node_ip_address()
-        node_port = Cluster.find_free_port()
+        node_port = self.acquire_free_port()
 
         from ..manager import WorkerInfo
 
-        return WorkerInfo(
+        self._worker_info = WorkerInfo(
             address=self._worker_address,
             rank=self._rank,
-            node_id=self._node_id,
+            cluster_node_rank=self._cluster_node_rank,
             accelerator_type=self._accelerator_type,
-            accelerator_id=self._local_accelerator_id,
+            accelerator_rank=self._local_accelerator_rank,
             node_ip=node_ip,
             node_port=node_port,
             available_accelerators=self.global_accelerator_ids,
+            hardware_infos=self.hardware_infos,
         )

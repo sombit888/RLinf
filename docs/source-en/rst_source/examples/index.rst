@@ -9,7 +9,7 @@ This example gallery is continuously expanding, covering new scenarios and tasks
 Embodied Intelligence Scenarios
 -------------------------------
 
-This category includes embodied training examples with SOTA models (e.g., pi0, pi0.5, OpenVLA-OFT) and different simulators (e.g., LIBERO, ManiSkill, RoboTwin),
+This category includes embodied training examples with SOTA models (e.g., pi0, pi0.5, OpenVLA-OFT) and different benchmarks (e.g., LIBERO, ManiSkill, RoboTwin, MetaWorld),
 as well as reinforcement learning training examples on real robots.
 
 .. raw:: html
@@ -22,7 +22,7 @@ as well as reinforcement learning training examples on real robots.
        </video>
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
          <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/maniskill.html" target="_blank" style="text-decoration: underline; color: blue;">
-          <b>RL with ManiSkill Simulator</b>
+          <b>RL with ManiSkill Benchmark</b>
          </a><br>
          ManiSkill + OpenVLA + PPO/GRPO achieves SOTA performance
        </p>
@@ -33,7 +33,7 @@ as well as reinforcement learning training examples on real robots.
             style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
          <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/libero.html" target="_blank" style="text-decoration: underline; color: blue;">
-          <b>RL with LIBERO Simulator</b>
+          <b>RL with LIBERO Benchmark</b>
          </a><br>
          LIBERO + OpenVLA-OFT + GRPO reaches 99% success rate
        </p>
@@ -57,30 +57,93 @@ as well as reinforcement learning training examples on real robots.
             style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
          <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/behavior.html" target="_blank" style="text-decoration: underline; color: blue;">
-          <b>Reinforcement Learning on Behavior Simulator</b>
+          <b>RL with Behavior Benchmark</b>
          </a><br>
          Support Behavior+OpenVLA-OFT+PPO/GRPO training
        </p>
      </div>
-
+     
      <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
-       <img src="https://raw.githubusercontent.com/RoboTwin-Platform/RoboTwin/main/assets/files/50_tasks.gif" 
-            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" 
-            data-target="animated-image.originalImage">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/metaworld.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
-         <b>[Ongoing]RL with RoboTwin</b><br>
-         RoboTwin + OpenVLA-OFT + PPO achieves SOTA performance
+         <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/metaworld.html" target="_blank" style="text-decoration: underline; color: blue;">
+          <b>RL with MetaWorld Benchmark</b>
+         </a><br>
+         Support MetaWorld+π₀/π₀.₅+PPO/GRPO training
        </p>
      </div>
 
      <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/IsaacLab.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/isaaclab.html" target="_blank" style="text-decoration: underline; color: blue;">
+          <b>RL with IsaacLab Benchmark</b>
+         </a><br>
+         Support IsaacLab+gr00t+PPO training
+       </p>
+     </div>
+   </div>
+
+   <div style="display: flex; justify-content: center; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/gr00t.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/gr00t.html" target="_blank" style="text-decoration: underline; color: blue;">
+          <b>RL on GR00T-N1.5 Model</b>
+         </a><br>
+         Support GR00T-N1.5 RL fine-tuning.
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/calvin.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);"
+            data-target="animated-image.originalImage">
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+        <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/calvin.html" target="_blank" style="text-decoration: underline; color: blue;">
+         <b>RL with CALVIN Benchmark</b>
+         </a><br>
+         Support CALVIN+π₀/π₀.₅+PPO/GRPO training
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/robocasa.jpeg"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/robocasa.html" target="_blank" style="text-decoration: underline; color: blue;">
+          <b>RL with RoboCasa Benchmark</b>
+         </a><br>
+         Support RoboCasa+π₀+GRPO training
+       </p>
+     </div>
+   </div>
+
+    
+   <div style="display: flex; justify-content: center; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
+    <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
        <img src="https://github.com/RLinf/misc/raw/main/pic/franka_arm_small.jpg"
             style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
-         <b>[Ongoing]Real-World RL with Franka</b><br>
+        <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/franka.html" target="_blank" style="text-decoration: underline; color: blue;">
+         <b>Real-World RL with Franka</b>
+         </a><br>
          RLinf worker seamlessly integrates with the Franka robotic arm
        </p>
      </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://raw.githubusercontent.com/RoboTwin-Platform/RoboTwin/main/assets/files/50_tasks.gif"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);"
+            data-target="animated-image.originalImage">
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <b>[Ongoing]RL with RoboTwin Benchmark</b><br>
+         RoboTwin + OpenVLA-OFT + PPO achieves SOTA performance
+       </p>
+     </div>     
    </div>
 
 
@@ -144,6 +207,17 @@ The following examples include agent workflow construction, online RL training, 
      </div>
 
      <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/searchr1.png"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="https://rlinf.readthedocs.io/en/latest/rst_source/examples/searchr1.html" target="_blank" style="text-decoration: underline; color: blue;">
+          <b>Search-R1 RL Training</b>
+         </a><br>
+         Train LLMs to answer questions by invoking search tools, RLinf accelerates the training process by 55%.
+       </p>
+     </div>
+
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
        <img src="https://github.com/RLinf/misc/raw/main/pic/waiting_icon.jpg"
             style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
        <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
@@ -200,6 +274,14 @@ Thanks to this decoupled design, workers can be flexibly and dynamically schedul
    maniskill
    libero
    behavior
+   metaworld
+   isaaclab
+   calvin
+   robocasa
    pi0
+   gr00t
    reasoning
    coding_online_rl
+   sft
+   searchr1
+   franka

@@ -80,6 +80,29 @@ def split_list(
         ]
 
 
+def merge_tensor(dst_tensor: torch.Tensor, src_tensor: torch.Tensor):
+    assert dst_tensor is None or torch.is_tensor(dst_tensor), (
+        f"Expected tensor, got {type(dst_tensor)}"
+    )
+    assert torch.is_tensor(src_tensor), f"Expected tensor, got {type(src_tensor)}"
+    if dst_tensor is None:
+        return src_tensor
+    else:
+        return torch.cat([dst_tensor, src_tensor], dim=0)
+
+
+def merge_list(dst_list: list, src_list: list):
+    assert dst_list is None or isinstance(dst_list, list), (
+        f"Expected list, got {type(dst_list)}"
+    )
+    assert isinstance(src_list, list), f"Expected list, got {type(src_list)}"
+    if dst_list is None:
+        return src_list
+    else:
+        dst_list.extend(src_list)
+        return dst_list
+
+
 def get_iterator_k_split(
     batch: Union[dict, list[torch.Tensor]],
     num_splits: int,
@@ -94,7 +117,7 @@ def get_iterator_k_split(
 
     Args:
         batch: Input batch data (dict or list of tensors).
-        num_microbatches: Number of microbatches to split into.
+        num_splits: Number of microbatches to split into.
         enforce_divisible_batch: Whether to enforce batch size being divisible by k.
         shuffle: Whether to shuffle the batch before splitting.
         shuffle_seed: Seed for reproducible shuffling.
@@ -466,9 +489,11 @@ def get_iterator_dynamic(
 
     Args:
         batch: Input batch as dict or list of tensors
-        num_microbatches: Target number of microbatches (used when max_tokens_per_mbs is None)
         max_tokens_per_mbs: Max sum of attention_mask per micro-batch
-        enforce_divisible_batch: Whether to enforce equal size partitions
+        dp_group: Data parallel group for synchronizing micro-batch numbers
+        num_batches_divided_by: Ensure number of micro-batches is divisible by this number
+        same_micro_num_in_dp: Whether to synchronize micro-batch numbers across data parallel ranks
+        min_num_micro_batch: Minimum number of micro-batches to create
     """
     if isinstance(batch, (dict, UserDict)):
         # Get effective sequence length of each sample

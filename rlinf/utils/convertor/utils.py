@@ -18,11 +18,14 @@ from typing import Callable, Optional
 
 import torch
 
+from rlinf.config import SupportedModel, get_supported_model
+
 
 class TransformType(Enum):
     SPLIT_QKV = "split_qkv"
     SPLIT_QKV_BIAS = "split_qkv_bias"
     SPLIT_FC1 = "split_fc1"
+    SPLIT_EXPERT_FC1 = "split_expert_fc1"
     SPLIT_NONE = "split_none"
 
 
@@ -34,7 +37,9 @@ class TransformFunc:
         hidden_size = config.model_config.hidden_size
         num_attention_heads = config.model_config.num_attention_heads
         num_query_groups = config.model_config.num_query_groups or num_attention_heads
-        head_dim = hidden_size // num_attention_heads
+        head_dim = config.model_config.kv_channels
+        if head_dim is None:
+            head_dim = hidden_size // num_attention_heads
 
         target_tp = config.reshard_tp_size
         assert num_query_groups % target_tp == 0, (
@@ -117,6 +122,21 @@ class TransformFunc:
         new_statedict[weight_names[1]] = up_proj.clone()
 
     @staticmethod
+    def split_expert_fc1(
+        linear_fc1: torch.Tensor, new_statedict: dict, weight_names: list[str], config
+    ) -> None:
+        assert weight_names is not None and len(weight_names) == 2, (
+            f"split_fc1 transform expects two weight names, got {weight_names}"
+        )
+
+        weight_chunk = torch.chunk(linear_fc1, 2, dim=0)
+        gate_proj = weight_chunk[0]
+        up_proj = weight_chunk[1]
+
+        new_statedict[weight_names[0]] = gate_proj.clone()
+        new_statedict[weight_names[1]] = up_proj.clone()
+
+    @staticmethod
     def split_none(
         tensor: torch.Tensor, new_statedict: dict, weight_names: list[str]
     ) -> None:
@@ -175,6 +195,8 @@ class BaseConvertor:
                 TransformFunc._split_gqa_tensor(v, converted, targets, self.cfg)
             elif transform == TransformType.SPLIT_FC1:
                 TransformFunc.split_fc1(v, converted, targets, self.cfg)
+            elif transform == TransformType.SPLIT_EXPERT_FC1:
+                TransformFunc.split_expert_fc1(v, converted, targets, self.cfg)
             elif transform == TransformType.SPLIT_NONE:
                 TransformFunc.split_none(v, converted, targets)
             else:
@@ -188,7 +210,7 @@ class BaseConvertor:
         raise NotImplementedError
 
 
-class Qwen2_5Convertor(BaseConvertor):
+class Qwen25Convertor(BaseConvertor):
     def build_rules(self) -> list[ConvertorRule]:
         LID = r"(?P<i>\d+)"
         WB = r"(?P<wb>weight|bias)"
@@ -266,7 +288,7 @@ class Qwen2_5Convertor(BaseConvertor):
         ]
 
 
-class Qwen2_5VLConvertor(BaseConvertor):
+class Qwen25VLConvertor(BaseConvertor):
     def _build_vision_rules(self) -> list[ConvertorRule]:
         B = r"(?P<i>\d+)"
         WB = r"(?P<wb>weight|bias)"
@@ -447,21 +469,169 @@ class Qwen2_5VLConvertor(BaseConvertor):
         return rules
 
 
-_MG2HF_CONVERTOR_REGISTRY = {}
+class Qwen3BaseConvertor(BaseConvertor):
+    def build_rules(self) -> list[ConvertorRule]:
+        LID = r"(?P<i>\d+)"
+        WB = r"(?P<wb>weight|bias)"
+
+        return [
+            # embeddings
+            ConvertorRule(
+                re.compile(r"embedding\.word_embeddings\.weight$"),
+                TransformType.SPLIT_NONE,
+                [r"model.embed_tokens.weight"],
+            ),
+            # final_layernorm
+            ConvertorRule(
+                re.compile(r"decoder\.final_layernorm\.weight$"),
+                TransformType.SPLIT_NONE,
+                [r"model.norm.weight"],
+            ),
+            # lm_head
+            ConvertorRule(
+                re.compile(r"output_layer\.weight$"),
+                TransformType.SPLIT_NONE,
+                [r"lm_head.weight"],
+            ),
+            # attn qkv norm
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.self_attention\.linear_qkv\.layer_norm_weight$"
+                ),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.input_layernorm.weight"],
+            ),
+            # attn qkv weights/bias
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.self_attention\.linear_qkv\.{WB}$"
+                ),
+                TransformType.SPLIT_QKV,
+                [
+                    r"model.layers.\g<i>.self_attn.q_proj.\g<wb>",
+                    r"model.layers.\g<i>.self_attn.k_proj.\g<wb>",
+                    r"model.layers.\g<i>.self_attn.v_proj.\g<wb>",
+                ],
+            ),
+            # attn q layernorm weight/bias
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.self_attention\.q_layernorm\.{WB}$"
+                ),
+                TransformType.SPLIT_NONE,
+                [
+                    r"model.layers.\g<i>.self_attn.q_norm.\g<wb>",
+                ],
+            ),
+            # attn k layernorm weight/bias
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.self_attention\.k_layernorm\.{WB}$"
+                ),
+                TransformType.SPLIT_NONE,
+                [
+                    r"model.layers.\g<i>.self_attn.k_norm.\g<wb>",
+                ],
+            ),
+            # attn o proj
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.self_attention\.linear_proj\.{WB}$"
+                ),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.self_attn.o_proj.\g<wb>"],
+            ),
+        ]
 
 
-def register_mg2hf_convertor(model_arch: str, convertor_cls: Callable) -> None:
-    if model_arch in _MG2HF_CONVERTOR_REGISTRY:
-        raise ValueError(f"Convertor for {model_arch} already registered")
-    _MG2HF_CONVERTOR_REGISTRY[model_arch] = convertor_cls
+class Qwen3DenseConvertor(Qwen3BaseConvertor):
+    def build_rules(self) -> list[ConvertorRule]:
+        LID = r"(?P<i>\d+)"
+        WB = r"(?P<wb>weight|bias)"
+
+        return [
+            *super().build_rules(),
+            # mlp fc1
+            ConvertorRule(
+                re.compile(rf"decoder\.layers\.{LID}\.mlp\.linear_fc1\.{WB}$"),
+                TransformType.SPLIT_FC1,
+                [
+                    r"model.layers.\g<i>.mlp.gate_proj.\g<wb>",
+                    r"model.layers.\g<i>.mlp.up_proj.\g<wb>",
+                ],
+            ),
+            # mlp fc2
+            ConvertorRule(
+                re.compile(rf"decoder\.layers\.{LID}\.mlp\.linear_fc2\.{WB}$"),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.mlp.down_proj.\g<wb>"],
+            ),
+            # mlp norms
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.mlp\.linear_fc1\.layer_norm_weight$"
+                ),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.post_attention_layernorm.weight"],
+            ),
+        ]
 
 
-register_mg2hf_convertor("qwen2.5", Qwen2_5Convertor)
-register_mg2hf_convertor("qwen2.5_vl", Qwen2_5VLConvertor)
+class Qwen3MoEConvertor(Qwen3BaseConvertor):
+    def build_rules(self) -> list[ConvertorRule]:
+        LID = r"(?P<i>\d+)"
+        EID = r"(?P<ei>\d+)"
+        WB = r"(?P<wb>weight|bias)"
+
+        return [
+            *super().build_rules(),
+            # mlp expert fc1
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.mlp\.experts\.local_experts\.{EID}\.linear_fc1\.{WB}$"
+                ),
+                TransformType.SPLIT_EXPERT_FC1,
+                [
+                    r"model.layers.\g<i>.mlp.experts.\g<ei>.gate_proj.\g<wb>",
+                    r"model.layers.\g<i>.mlp.experts.\g<ei>.up_proj.\g<wb>",
+                ],
+            ),
+            # mlp expert fc2
+            ConvertorRule(
+                re.compile(
+                    rf"decoder\.layers\.{LID}\.mlp\.experts\.local_experts\.{EID}\.linear_fc2\.{WB}$"
+                ),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.mlp.experts.\g<ei>.down_proj.\g<wb>"],
+            ),
+            # pre_mlp_layernorms
+            ConvertorRule(
+                re.compile(rf"decoder\.layers\.{LID}\.pre_mlp_layernorm\.{WB}$"),
+                TransformType.SPLIT_NONE,
+                [r"model.layers.\g<i>.post_attention_layernorm.\g<wb>"],
+            ),
+            # router weight
+            ConvertorRule(
+                re.compile(rf"decoder\.layers\.{LID}\.mlp\.router\.{WB}$"),
+                TransformType.SPLIT_NONE,
+                [
+                    r"model.layers.\g<i>.mlp.gate.\g<wb>",
+                ],
+            ),
+        ]
 
 
-def get_mg2hf_convertor(model_arch: str, config, strict: bool = False) -> BaseConvertor:
-    if model_arch not in _MG2HF_CONVERTOR_REGISTRY:
-        raise ValueError(f"No convertor registered for {model_arch}")
-    convertor_cls = _MG2HF_CONVERTOR_REGISTRY[model_arch]
+_MG2HF_CONVERTOR_REGISTRY = {
+    SupportedModel.QWEN2_5: Qwen25Convertor,
+    SupportedModel.QWEN2_5_VL: Qwen25VLConvertor,
+    SupportedModel.QWEN3: Qwen3DenseConvertor,
+    SupportedModel.QWEN3_MOE: Qwen3MoEConvertor,
+}
+
+
+def get_mg2hf_convertor(model_type: str, config, strict: bool = False) -> BaseConvertor:
+    model_type = get_supported_model(model_type)
+    if model_type not in _MG2HF_CONVERTOR_REGISTRY:
+        raise ValueError(f"No convertor registered for {model_type.value}")
+    convertor_cls = _MG2HF_CONVERTOR_REGISTRY[model_type]
     return convertor_cls(config=config, strict=strict)

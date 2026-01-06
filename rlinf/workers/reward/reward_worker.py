@@ -80,7 +80,7 @@ class RewardWorker(Worker):
                             rollout_result
                         )
 
-            output_channel.put(rollout_result)
+            output_channel.put(rollout_result, async_op=True)
 
         assert recv_batch_size == self.total_batch_size_per_dp, (
             f"Expected {self.total_batch_size_per_dp} sequences from channel, but got {recv_batch_size}"
@@ -88,15 +88,20 @@ class RewardWorker(Worker):
 
     def _compute_rule_based_rewards(self, rollout_result: RolloutResult):
         # Decode only the generated tokens; response_ids are already the post-prompt tokens
-        texts = self.tokenizer.batch_decode(
-            rollout_result.response_ids, skip_special_tokens=True
-        )
+        texts = rollout_result.response_texts
+        if texts is None:
+            texts = self.tokenizer.batch_decode(
+                rollout_result.response_ids, skip_special_tokens=True
+            )
 
         kwargs = {}
         if getattr(self.cfg.reward, "use_prompt", False):
-            kwargs["prompts"] = self.tokenizer.batch_decode(
-                rollout_result.prompt_ids, skip_special_tokens=True
-            )
+            prompts = rollout_result.prompt_texts
+            if prompts is None:
+                prompts = self.tokenizer.batch_decode(
+                    rollout_result.prompt_ids, skip_special_tokens=True
+                )
+            kwargs["prompts"] = prompts
         scores = self.reward.get_reward(texts, rollout_result.answers, **kwargs)
         return (
             torch.as_tensor(scores, dtype=torch.float, device=torch.device("cpu"))

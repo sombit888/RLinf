@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import time
 from functools import partial
 from typing import Callable, Optional
 
@@ -66,7 +67,6 @@ from rlinf.utils.distributed import (
     vocab_parallel_log_probs_from_logits,
 )
 from rlinf.utils.placement import ModelParallelComponentPlacement, PlacementMode
-from rlinf.utils.profiler import PyTorchProfiler, PyTorchProfilerFunc
 from rlinf.utils.resharding.mcore_weight_reshard import MegatronCoreWeightReshard
 from rlinf.utils.resharding.reshard_config import ReshardConfig
 from rlinf.utils.train_utils import (
@@ -113,6 +113,7 @@ class MegatronActor(MegatronModelManager, Worker):
         super().__init__(role_cfg)
         self.cfg = cfg
         self.component_placement = placement
+        self.dst_tp_rank = self._rank % placement.rollout_tp_size
 
         # check placement validity when actor backend is megatron
         assert placement.rollout_tp_size <= placement.actor_tp_size, (
@@ -146,7 +147,7 @@ class MegatronActor(MegatronModelManager, Worker):
 
         self.kl_beta = self.cfg.algorithm.kl_beta
         self.kl_penalty_type = self.cfg.algorithm.kl_penalty_type
-        self.clip_ratio_c = self.cfg.algorithm.clip_ratio_c
+        self.clip_ratio_c = self.cfg.algorithm.get("clip_ratio_c", 3.0)
         if self.cfg.algorithm.loss_agg_func == "token-mean":
             self.loss_agg_func = masked_mean
         elif self.cfg.algorithm.loss_agg_func == "seq-mean-token-sum":
@@ -199,7 +200,10 @@ class MegatronActor(MegatronModelManager, Worker):
                 "Dynamic batch size is not supported in pipeline mode."
             )
 
-        self._init_profiler()
+        self.use_profiler = self.cfg.actor.megatron.use_profiler
+        if self.use_profiler:
+            self.init_profiler()
+
         self._init_auto_scheduler(role)
 
     def _init_auto_scheduler(self, role: str):
@@ -215,50 +219,16 @@ class MegatronActor(MegatronModelManager, Worker):
             and self.use_pre_process_policy
         )
 
+        if self.use_auto_scheduler:
+            assert HAVE_RESHARDING, (
+                "params_resharding is not installed, resharding is not supported"
+            )
         if self.use_auto_scheduler and self._rank == 0:
             self.schedule_channel = self.connect_channel(
                 get_scheduler_channel(role, self._rank)
             )
             self.scheduler_request_queue = get_scheduler_request_queue()
             self.scheduler_response_queue = get_scheduler_response_queue()
-
-    def _init_profiler(self):
-        def _validate_schedule_info():
-            assert (
-                self.cfg.actor.megatron.profiler.schedule_warmup is not None
-                and self.cfg.actor.megatron.profiler.schedule_warmup >= 0
-            ), "<schedule_warmup> must be set and greater than 0 when using profiler."
-            assert (
-                self.cfg.actor.megatron.profiler.schedule_active is not None
-                and self.cfg.actor.megatron.profiler.schedule_active > 0
-            ), "<schedule_active> must be set and greater than 0 when using profiler."
-
-        self.use_profiler = self.cfg.actor.megatron.use_profiler
-
-        # here we should validate profiler's schedule info
-        if self.use_profiler:
-            _validate_schedule_info()
-        self.profiler = (
-            PyTorchProfiler.from_config(self.cfg.actor.megatron.profiler)
-            if self.use_profiler
-            else None
-        )
-        self._forward_only_record = PyTorchProfilerFunc(
-            "forward_only", self.use_profiler
-        )
-        self._dynamic_batch_processing_record = PyTorchProfilerFunc(
-            "dynamic_batch_processing", self.use_profiler
-        )
-        self._static_batch_processing_record = PyTorchProfilerFunc(
-            "static_batch_processing", self.use_profiler
-        )
-        self._broadcast_outputs_record = PyTorchProfilerFunc(
-            "broadcast_outputs", self.use_profiler
-        )
-
-        self._megatron_forward_backward_record = PyTorchProfilerFunc(
-            "megatron_forward_backward", self.use_profiler
-        )
 
     def _load_weight_and_optimizer(self):
         # Acquire the GPUs to ensure that no one is using them before loading models
@@ -291,21 +261,27 @@ class MegatronActor(MegatronModelManager, Worker):
         self.ref_policy_state_dict = ref_policy_state_dict
 
         rollout_reshard_config = ReshardConfig(
-            model_arch=self.cfg.rollout.model_arch,
+            model_type=self.cfg.rollout.model.model_type,
             model_config=self.transformer_config,
             reshard_tp_size=self.cfg.rollout.tensor_parallel_size,
             reshard_pp_size=self.cfg.rollout.pipeline_parallel_size,
+            mg_ep_size=self.cfg.actor.model.expert_model_parallel_size,
+            mg_tpe_size=self.cfg.actor.model.expert_tensor_parallel_size,
+            moe_grouped_gemm=self.cfg.actor.model.get("moe_grouped_gemm", None),
         )
         self.rollout_weights_reshard = MegatronCoreWeightReshard(rollout_reshard_config)
         self._setup_rollout_weight_dst_ranks()
 
         if self.component_placement.has_dedicated_inference:
             inference_reshard_config = ReshardConfig(
-                model_arch=self.cfg.inference.model_arch,
+                model_type=self.cfg.inference.model_type,
                 model_config=self.transformer_config,
                 reshard_weights_format="mcore",
                 reshard_tp_size=self.cfg.inference.model.tensor_model_parallel_size,
                 reshard_pp_size=self.cfg.inference.model.pipeline_model_parallel_size,
+                mg_ep_size=self.cfg.actor.model.expert_model_parallel_size,
+                mg_tpe_size=self.cfg.actor.model.expert_tensor_parallel_size,
+                moe_grouped_gemm=self.cfg.actor.model.get("moe_grouped_gemm", None),
             )
             self.inference_weights_reshard = MegatronCoreWeightReshard(
                 inference_reshard_config
@@ -315,8 +291,11 @@ class MegatronActor(MegatronModelManager, Worker):
         torch.distributed.barrier()
 
     def get_batch(
-        self, channel: Channel
+        self, channel: Channel, tag: Optional[str] = None
     ) -> tuple[dict[str, torch.Tensor], RolloutResult]:
+        if tag is not None:
+            # for pipeline mode to filter channel communicate time.
+            start_time = time.perf_counter()
         if channel.is_local:
             # Local channel, every process will put its own data locally
             # No need to broadcast
@@ -339,16 +318,114 @@ class MegatronActor(MegatronModelManager, Worker):
             self.tokenizer.eos_token_id,
         )
 
+        if tag is not None:
+            duration = time.perf_counter() - start_time
+            self._timer_metrics[tag] = self._timer_metrics.get(tag, 0.0) - duration
         return batch, result
+
+    def all_reduce_dp_min(
+        self,
+        obj: int,
+    ):
+        obj_tensor = torch.tensor(
+            [obj], dtype=torch.long, device=torch.cuda.current_device()
+        )
+        torch.distributed.all_reduce(
+            obj_tensor,
+            torch.distributed.ReduceOp.MIN,
+            group=parallel_state.get_data_parallel_group(),
+        )
+        return obj_tensor.item()
+
+    def get_dynamic_batch_as_much(
+        self,
+        input_channel: Channel,
+        min_result_len: int,
+        max_result_len: int,
+        cliped_results=[],
+        unfinished_result=None,
+    ):
+        assert not input_channel.is_local
+        rollout_results = cliped_results
+        if self.is_data_io_rank:
+            # get min_result_len
+            while len(rollout_results) < min_result_len:
+                if unfinished_result is not None:
+                    rollout_result: RolloutResult = unfinished_result.wait()
+                    unfinished_result = None
+                else:
+                    rollout_result: RolloutResult = input_channel.get()
+                rollout_results.append(rollout_result)
+
+            # try to get result as much
+            # get result in every 0.1s and do all reduce to get the min result between dp (result_len)
+            # stop at: the min result between dp (result_len) is same as the last min result
+            last_result_len = 0
+            result_len = len(rollout_results)
+            time_until = time.time() + 0.1
+            while last_result_len < result_len:
+                if len(rollout_results) < max_result_len:
+                    if unfinished_result is None:
+                        unfinished_result = input_channel.get(async_op=True)
+                    else:
+                        time.sleep(0.001)
+                    if unfinished_result.done():
+                        rollout_results.append(unfinished_result.wait())
+                        unfinished_result = None
+                    if time.time() >= time_until:
+                        last_result_len = result_len
+                        result_len = self.all_reduce_dp_min(len(rollout_results))
+                        if last_result_len < result_len:
+                            time_until = time.time() + 0.1
+                else:
+                    last_result_len = result_len
+                    result_len = self.all_reduce_dp_min(len(rollout_results))
+
+        # broadcast to other ranks
+        if not self.is_data_io_rank:
+            result_len = None
+        result_len = self.broadcast(
+            result_len, ranks=parallel_state._MODEL_PARALLEL_GLOBAL_RANKS
+        )
+        result_len = self.broadcast(
+            result_len, ranks=parallel_state._CONTEXT_PARALLEL_GLOBAL_RANKS
+        )
+        if self.is_data_io_rank:
+            cliped_results = list(rollout_results[result_len:])
+            rollout_results = rollout_results[:result_len]
+        else:
+            rollout_results = [None for _ in range(result_len)]
+        for i in range(result_len):
+            rollout_result = rollout_results[i]
+            rollout_result = self.broadcast(
+                rollout_result, ranks=parallel_state._MODEL_PARALLEL_GLOBAL_RANKS
+            )
+            rollout_result = self.broadcast(
+                rollout_result, ranks=parallel_state._CONTEXT_PARALLEL_GLOBAL_RANKS
+            )
+            rollout_results[i] = rollout_result
+
+        batches = []
+        for rollout_result in rollout_results:
+            batch = rollout_result.to_actor_batch(
+                self.cfg.data.max_prompt_length,
+                self.cfg.actor.model.encoder_seq_length,
+                self.tokenizer.eos_token_id,
+            )
+            batches.append(batch)
+
+        batch = RolloutResult.merge_batches(batches)
+        rollout_result = RolloutResult.merge_result_list(rollout_results)
+        return batch, rollout_result, result_len, cliped_results, unfinished_result
 
     def put_result(self, result: RolloutResult, channel: Channel):
         if channel.is_local:
             # Local channel, every process will put its own data locally
             # No need to broadcast
-            channel.put(result)
+            channel.put(result, async_op=True)
         else:
             if self.is_data_io_rank:
-                channel.put(result)
+                channel.put(result, async_op=True)
 
     def get_forward_step_func(self):
         """Acquire the forward step function for the model."""
@@ -360,13 +437,14 @@ class MegatronActor(MegatronModelManager, Worker):
 
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"]
+            response_mask = batch["response_mask"]
             position_ids = batch["position_ids"]
 
             response_len = self.response_len
             responses = input_ids[:, -response_len:]
             label = copy.deepcopy(position_ids)
             label[:, -response_len - 1 : -1] = responses
-            label_mask = copy.deepcopy(attention_mask)
+            label_mask = copy.deepcopy(response_mask)
             label_mask[:, : -response_len - 1] = False
             label_mask[:, -1] = False
 
@@ -405,7 +483,11 @@ class MegatronActor(MegatronModelManager, Worker):
             if not self.return_loss:
 
                 def id_func(output, non_loss_data=True):
-                    return output["log_probs"][:, -response_len - 1 : -1].contiguous()
+                    return output
+
+                # in last stage need to get the log_probs from the output
+                if unwrap_model(model).post_process:
+                    output = output["log_probs"][:, -response_len - 1 : -1].contiguous()
 
                 return output, id_func
 
@@ -428,7 +510,7 @@ class MegatronActor(MegatronModelManager, Worker):
                         min=self.cfg.algorithm.importance_sampling_clip,
                     )
 
-                mask = batch["attention_mask"][:, -response_len:]
+                mask = batch["response_mask"][:, -response_len:]
 
                 loss, metrics_data = policy_loss(
                     task_type=self.cfg.runner.task_type,
@@ -437,6 +519,7 @@ class MegatronActor(MegatronModelManager, Worker):
                     logprobs=curr_logprobs,
                     old_logprobs=prev_logprobs,
                     advantages=advantages,
+                    clip_ratio_c=self.clip_ratio_c,
                     clip_ratio_low=self.clip_ratio_low,
                     clip_ratio_high=self.clip_ratio_high,
                     loss_mask=mask,
@@ -549,8 +632,14 @@ class MegatronActor(MegatronModelManager, Worker):
 
         self.log_debug(f"{total_seqlen=}, {num_microbatches=}")
 
-        if forward_only:
-            self._forward_only_record.start()
+        if self.use_profiler:
+            self.profiler.start(forward_only=forward_only)
+            forward_backward_record = (
+                self.forward_only_record
+                if forward_only
+                else self.megatron_forward_backward_record
+            )
+            forward_backward_record.start()
         forward_outputs = fwd_bwd_function(
             forward_step_func=self.get_forward_step_func(),
             data_iterator=self.make_data_iterator_list(batch_iter),
@@ -561,8 +650,9 @@ class MegatronActor(MegatronModelManager, Worker):
             micro_batch_size=1,
             collect_non_loss_data=forward_only,
         )
-        if forward_only:
-            self._forward_only_record.stop()
+        if self.use_profiler:
+            forward_backward_record.stop()
+            self.profiler.stop(forward_only=forward_only)
 
         outputs = self._process_fwd_bwd_outputs(forward_outputs, forward_only)
 
@@ -594,8 +684,14 @@ class MegatronActor(MegatronModelManager, Worker):
 
         self.log_debug(f"{total_seqlen=}, {num_microbatches=}")
 
-        if forward_only:
-            self._forward_only_record.start()
+        if self.use_profiler:
+            self.profiler.start(forward_only=forward_only)
+            forward_backward_record = (
+                self.forward_only_record
+                if forward_only
+                else self.megatron_forward_backward_record
+            )
+            forward_backward_record.start()
         forward_outputs = fwd_bwd_function(
             forward_step_func=self.get_forward_step_func(),
             data_iterator=self.make_data_iterator_list(batch_iterator),
@@ -606,8 +702,9 @@ class MegatronActor(MegatronModelManager, Worker):
             micro_batch_size=1,
             collect_non_loss_data=forward_only,
         )
-        if forward_only:
-            self._forward_only_record.stop()
+        if self.use_profiler:
+            forward_backward_record.stop()
+            self.profiler.stop(forward_only=forward_only)
 
         outputs = self._process_fwd_bwd_outputs(forward_outputs, forward_only)
 
@@ -618,7 +715,7 @@ class MegatronActor(MegatronModelManager, Worker):
     ):
         if forward_only:
             outputs = torch.cat(forward_outputs) if len(forward_outputs) > 0 else None
-            if self.enable_dynamic_batch_size:
+            if self.enable_dynamic_batch_size and outputs is not None:
                 indices = sum(self.dbs_indices, [])
                 assert len(indices) == outputs.size(0), (
                     f"Dynamic batch size indices length {len(indices)} does not equal output length {outputs.size()}"
@@ -689,7 +786,7 @@ class MegatronActor(MegatronModelManager, Worker):
                 * self.cfg.actor.micro_batch_size
             )
         else:
-            loss_mask = batch["attention_mask"][:, -self.response_len :]
+            loss_mask = batch["response_mask"][:, -self.response_len :]
             global_valid_token = loss_mask.to(dtype=torch.float32).sum().cuda()
             torch.distributed.all_reduce(
                 global_valid_token, group=parallel_state.get_data_parallel_group()
@@ -755,8 +852,12 @@ class MegatronActor(MegatronModelManager, Worker):
 
         # Advantage normalization
         if self.cfg.algorithm.normalize_advantages:
-            mask = batch["attention_mask"][:, -self.response_len :]
-            batch["advantages"] = masked_normalization(batch["advantages"], mask)
+            mask = batch["response_mask"][:, -self.response_len :]
+            batch["advantages"] = masked_normalization(
+                batch["advantages"],
+                mask,
+                group=parallel_state.get_data_parallel_group(),
+            )
 
         # Valid token scale
         if self.cfg.algorithm.use_valid_token_scale:
@@ -817,8 +918,12 @@ class MegatronActor(MegatronModelManager, Worker):
         if self.cfg.algorithm.normalize_advantages:
 
             def normalize_advantages(batch: dict[str, torch.Tensor]):
-                mask = batch["attention_mask"][:, -self.response_len :]
-                batch["advantages"] = masked_normalization(batch["advantages"], mask)
+                mask = batch["response_mask"][:, -self.response_len :]
+                batch["advantages"] = masked_normalization(
+                    batch["advantages"],
+                    mask,
+                    group=parallel_state.get_data_parallel_group(),
+                )
                 return batch
 
             train_batch_iterator.register_global_batch_handler(normalize_advantages)
@@ -954,9 +1059,6 @@ class MegatronActor(MegatronModelManager, Worker):
 
     def init_trainer_resharding(self, first_world_size: int = -1):
         """Init resharding func."""
-        assert HAVE_RESHARDING, (
-            "params_resharding is not installed, resharding is not supported"
-        )
         from megatron.core import __version__ as megatron_version
         from packaging import version
 
@@ -1115,8 +1217,14 @@ class MegatronActor(MegatronModelManager, Worker):
 
     def _get_inference_model_state_dict(self):
         """Get the state dictionary of the model for inference."""
+        model = unwrap_model(self.model)
+        model_state_dict = {}
+        for key, val in model[0].state_dict().items():
+            if "_extra_state" in key:
+                continue
+            model_state_dict[key] = val
         return self.inference_weights_reshard.gather_and_reshard_model(
-            unwrap_model(self.model)
+            model_state_dict, self.dst_tp_rank
         )
 
     def sync_model_to_inference(self):
@@ -1135,6 +1243,8 @@ class MegatronActor(MegatronModelManager, Worker):
 
     @torch.no_grad()
     def inference_step(self, batch):
+        # set the megatron actor in inference step
+        set_sync_funcs(self, forward_only=True)
         set_eval(self)
         return self.run_forward_backward(batch, forward_only=True)
 
@@ -1152,18 +1262,50 @@ class MegatronActor(MegatronModelManager, Worker):
             output_channel: The output channel to send results to.
             compute_ref_logprobs: Whether to compute reference logprobs.
         """
-        recv_batch_size = 0
-        while recv_batch_size < self.total_batch_size_per_dp:
-            batch, rollout_result = self.get_batch(input_channel)
-            recv_batch_size += rollout_result.num_sequence
-            # Must be called after batch is retrieved, suggesting that rollout has stopped
-            # Otherwise, loading model might cause OOM in the collocated mode
+        inference_split = self.cfg.actor.get("inference_split", None)
+        if inference_split is None:
+            if not self.is_pipeline:
+                inference_split = 1
+            else:
+                inference_split = self.cfg.algorithm.n_minibatches
+        assert self.total_batch_size_per_dp % inference_split == 0, (
+            f"MegatronActor: total_batch_size_per_dp[{self.total_batch_size_per_dp}] should be divisible by inference_split[{inference_split}]"
+        )
+
+        min_result_len = 1
+        max_result_len = (
+            self.cfg.data.rollout_batch_size
+            // parallel_state.get_data_parallel_world_size()
+            // inference_split
+        )
+        if not self.is_pipeline:
+            min_result_len = max_result_len
+            coll_rollout_results = []
+        total_result_len = 0
+        total_result_len_per_dp = (
+            self.cfg.data.rollout_batch_size
+            // parallel_state.get_data_parallel_world_size()
+        )
+        cliped_results, unfinished_result = [], None
+        while total_result_len < total_result_len_per_dp:
+            batch, rollout_result, result_len, cliped_results, unfinished_result = (
+                self.get_dynamic_batch_as_much(
+                    input_channel,
+                    min(min_result_len, total_result_len_per_dp - total_result_len),
+                    min(max_result_len, total_result_len_per_dp - total_result_len),
+                    cliped_results,
+                    unfinished_result,
+                )
+            )
+            total_result_len += result_len
+            self.log_info(
+                f"[dynamic inference rank-{self._rank}] inference result_len={result_len}, total_result_len={total_result_len}/{total_result_len_per_dp}"
+            )
             self._load_weight_and_optimizer()
 
-            # Prev logprobs
             with self.worker_timer():
+                # Prev logprobs
                 prev_logprobs = self.inference_step(batch)
-
                 if rollout_result.rollout_logprobs is not None:
                     # Rollout has returned logprobs, store the recomputed logprobs in recompute_prev_logprobs
                     rollout_result.recompute_prev_logprobs = prev_logprobs.cpu()
@@ -1171,18 +1313,33 @@ class MegatronActor(MegatronModelManager, Worker):
                     # Otherwise, store the logprobs in prev_logprobs (the final logprobs used for training)
                     rollout_result.prev_logprobs = prev_logprobs.cpu()
 
-            # Ref logprobs
-            if compute_ref_logprobs:
-                assert self.ref_policy_state_dict is not None
-                with cpu_weight_swap(self.model[0], self.ref_policy_state_dict):
-                    ref_logprobs = self.inference_step(batch)
-                    rollout_result.ref_logprobs = ref_logprobs.cpu()
-            self.put_result(rollout_result, output_channel)
+                # Ref logprobs
+                if compute_ref_logprobs:
+                    assert self.ref_policy_state_dict is not None
+                    with cpu_weight_swap(self.model[0], self.ref_policy_state_dict):
+                        ref_logprobs = self.inference_step(batch)
+                        rollout_result.ref_logprobs = ref_logprobs.cpu()
+            if self.is_pipeline:
+                # for pipeline mode, send after inference to reduce latency.
+                # should do split to ensure actor won't get too much batches.
+                split_results = RolloutResult.split_results(rollout_result, result_len)
+                for split_result in split_results:
+                    self.put_result(split_result, output_channel)
+            else:
+                coll_rollout_results.append(rollout_result)
 
-        assert recv_batch_size == self.total_batch_size_per_dp, (
-            f"Expected {self.total_batch_size_per_dp} sequences from channel, but got {recv_batch_size}"
+        if not self.is_pipeline:
+            # for coll mode, merge results to reduce send time.
+            rollout_result = RolloutResult.merge_result_list(coll_rollout_results)
+            split_results = RolloutResult.split_results(
+                rollout_result,
+                min(total_result_len, self.cfg.algorithm.n_minibatches),
+            )
+            for split_result in split_results:
+                self.put_result(split_result, output_channel)
+        assert total_result_len == total_result_len_per_dp, (
+            f"Expected {total_result_len_per_dp} sequences from channel, but got {total_result_len}"
         )
-
         self.scheduler_offload_sync()
 
     # Advantages and returns
@@ -1194,7 +1351,7 @@ class MegatronActor(MegatronModelManager, Worker):
         """
         with self.worker_timer():
             if batch.get("advantages", None) is None:
-                mask = batch["attention_mask"][:, -self.response_len :]
+                mask = batch["response_mask"][:, -self.response_len :]
                 advantages, _ = calculate_adv_and_returns(
                     task_type=self.cfg.runner.task_type,
                     adv_type=self.cfg.algorithm.adv_type,
@@ -1218,10 +1375,10 @@ class MegatronActor(MegatronModelManager, Worker):
         return batch
 
     # Rollout
-    def _get_rollout_model_state_dict(self):
+    def _get_rollout_model_state_dict(self, bucket_weight):
         """Get the state dictionary of the model for rollout."""
         return self.rollout_weights_reshard.gather_and_reshard_model(
-            unwrap_model(self.model)
+            bucket_weight, self.dst_tp_rank
         )
 
     def _setup_rollout_weight_dst_ranks(self):
@@ -1239,30 +1396,88 @@ class MegatronActor(MegatronModelManager, Worker):
             del self.reshard_state_dict
             clear_memory()
 
+    def divide_model_to_bucket(self):
+        model_bucket_list = self.rollout_weights_reshard.divide_model_to_bucket(
+            self.model
+        )
+        return model_bucket_list
+
     def sync_model_to_rollout(self):
         """Send the model weights to the destination ranks in the rollout task."""
         if self.recreate_nccl_groups:
             nccl_group_recreate()
         if not self.is_running:
             return
-        self.get_model_state_and_offload()
-        if self.component_placement._placement_mode == PlacementMode.COLLOCATED:
-            handle = {k: reduce_tensor(v) for k, v in self.reshard_state_dict.items()}
-            self.send(handle, self.rollout_group_name, self._weight_dst_rank_in_rollout)
+
+        model_bucket_list = self.divide_model_to_bucket()
+        if not hasattr(self, "sync_model_bucket_length"):
+            self.sync_model_bucket_length = len(model_bucket_list)
         else:
-            for weight_dst_rank in self._weight_dst_rank_in_rollout:
-                self.send(
-                    self.reshard_state_dict,
+            assert self.sync_model_bucket_length == len(model_bucket_list), (
+                f"last sync_model_bucket_length {self.sync_model_bucket_length} don't equal now the len(model_bucket_list) {len(model_bucket_list)}"
+            )
+            assert self.sync_model_bucket_length != 0, (
+                "error the self.sync_model_bucket_length is 0"
+            )
+
+        self.model_state_offload_optimizer_and_grad()
+
+        # send bucket size
+        if self.component_placement._placement_mode == PlacementMode.COLLOCATED:
+            send_handle = None
+            for bucket_weight in model_bucket_list:
+                reshard_state_dict = self._get_rollout_model_state_dict(bucket_weight)
+                buffer = {k: reduce_tensor(v) for k, v in reshard_state_dict.items()}
+                if send_handle is not None:
+                    send_handle.wait()
+                else:
+                    # add the bucket_length message in bucket 0
+                    buffer["bucket_length"] = len(model_bucket_list)
+                send_handle = self.send(
+                    buffer,
                     self.rollout_group_name,
-                    weight_dst_rank,
+                    self._weight_dst_rank_in_rollout,
+                    async_op=True,
                 )
+                del reshard_state_dict
+            send_handle.wait()
+        else:
+            send_handle_bucket = []
+            for bucket_weight in model_bucket_list:
+                reshard_state_dict = self._get_rollout_model_state_dict(bucket_weight)
 
-    def get_model_state_and_offload(self):
-        """Send the model weights to the destination ranks in the rollout task.
+                if len(send_handle_bucket) != 0:
+                    for send_handle in send_handle_bucket:
+                        send_handle.wait()
+                    send_handle_bucket = []
+                else:
+                    # add the bucket_length message in bucket 0
+                    reshard_state_dict["bucket_length"] = len(model_bucket_list)
 
-        When in COLLOCATED mode or when `use_pre_process_policy` is True, first offload the optimizer and gradients.
-        Then call `_get_rollout_model_state_dict()`, and finally offload the model weights.
-        """
+                for weight_dst_rank in self._weight_dst_rank_in_rollout:
+                    send_handle = self.send(
+                        reshard_state_dict,
+                        self.rollout_group_name,
+                        weight_dst_rank,
+                        async_op=True,
+                    )
+                    send_handle_bucket.append(send_handle)
+
+            if len(send_handle_bucket) != 0:
+                for send_handle in send_handle_bucket:
+                    send_handle.wait()
+
+        if (
+            self.component_placement._placement_mode == PlacementMode.COLLOCATED
+            or self.use_pre_process_policy
+        ):
+            if self.offload_weight:
+                self.offload_model_weights_and_grad(
+                    offload_grad=False, offload_weight=True
+                )
+                self.is_weight_offloaded = True
+
+    def model_state_offload_optimizer_and_grad(self):
         if not self.is_running:
             return
         if (
@@ -1275,12 +1490,6 @@ class MegatronActor(MegatronModelManager, Worker):
             self.offload_model_weights_and_grad(
                 offload_grad=self.offload_grad, offload_weight=False
             )
-            self.reshard_state_dict = self._get_rollout_model_state_dict()
-            if self.offload_weight:
-                self.offload_model_weights_and_grad(
-                    offload_grad=False, offload_weight=True
-                )
-                self.is_weight_offloaded = True
         else:
             assert self.component_placement._placement_mode in [
                 PlacementMode.DISAGGREGATED,
@@ -1289,7 +1498,6 @@ class MegatronActor(MegatronModelManager, Worker):
             assert isinstance(self._weight_dst_rank_in_rollout, list), (
                 f"In disaggregated mode, weight_dst_rank_in_rollout should be a list of ranks, got {type(self._weight_dst_rank_in_rollout)}"
             )
-            self.reshard_state_dict = self._get_rollout_model_state_dict()
 
     def _compute_rollout_metrics(self, batch):
         rollout_metrics_compute_data_group = self.get_rollout_metrics_group(batch)
