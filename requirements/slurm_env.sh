@@ -30,5 +30,22 @@ export TMPDIR=/scratch/$USER/tmp
 mkdir -p $TMPDIR
 bash requirements/install.sh ${1:-"openvla"}
 source .venv/bin/activate
-hf download gen-robot/openvla-7b-rlvla-warmup --local-dir /scratch/sombit_dey/openvla-7b-rlvla-warmup/
 
+download_model() {
+    local model_checkpoint="$1"
+    local model_name
+    model_name=$(basename "$model_checkpoint")
+    local target_dir="/scratch/$USER/models/$model_name"
+
+    mkdir -p "$target_dir"
+    echo "Downloading $model_checkpoint to $target_dir..."
+    hf download "$model_checkpoint" --local-dir "$target_dir"
+}
+
+if [ -n "$2" ]; then
+    download_model "$2"
+fi
+# download the model if the environment is openvla
+# if [ "${1:-openvla}" == "openvla" ]; then
+#     hf download gen-robot/openvla-7b-rlvla-warmup --local-dir /scratch/$USER/models/openvla-7b-rlvla-warmup/
+# fi
