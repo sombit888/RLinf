@@ -40,7 +40,47 @@ assert vs.parse(ray_version) >= vs.parse("2.47.0"), (
 if TYPE_CHECKING:
     from ..worker import Worker
 
+os.environ.pop("RAY_RUNTIME_ENV_HOOK", None)
+# Some installs/variants might use a slightly different var — unset defensively:
+os.environ.pop("RAY_RUNTIME_ENV_HOOKS", None)
+try:
+    import psutil
 
+    # Save original methods
+    _orig_parents = getattr(psutil.Process, "parents", None)
+    _orig_children = getattr(psutil.Process, "children", None)
+
+    def _safe_parents(self):
+        try:
+            if _orig_parents is None:
+                return []
+            return _orig_parents(self)
+        except Exception as e:
+            from psutil import AccessDenied, ZombieProcess
+
+            if isinstance(e, (AccessDenied, PermissionError, ZombieProcess)):
+                return []
+            raise
+
+    def _safe_children(self, *args, **kwargs):
+        try:
+            if _orig_children is None:
+                return []
+            return _orig_children(self, *args, **kwargs)
+        except Exception as e:
+            from psutil import AccessDenied, ZombieProcess
+
+            if isinstance(e, (AccessDenied, PermissionError, ZombieProcess)):
+                return []
+            raise
+
+    # Apply monkeypatch
+    psutil.Process.parents = _safe_parents
+    psutil.Process.children = _safe_children
+
+except Exception:
+    # If psutil is not available this early, silently ignore.
+    pass
 class ClusterEnvVar(str, Enum):
     """Scheduler environment variables. All env vars are prefixed with {Cluster.SYS_NAME}_ in usage."""
 
