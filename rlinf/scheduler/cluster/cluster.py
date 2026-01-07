@@ -196,11 +196,14 @@ class Cluster:
                 address="auto",
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                runtime_env=None,  # Important
+
             )
         except ConnectionError:
             ray.init(
                 logging_level=Cluster.LOGGING_LEVEL,
                 namespace=Cluster.NAMESPACE,
+                runtime_env=None,  # Important
             )
 
         # If num_nodes is 0, infer the number of nodes from the connected Ray cluster
@@ -301,6 +304,8 @@ class Cluster:
                 address="auto",
                 namespace=Cluster.NAMESPACE,
                 logging_level=Cluster.LOGGING_LEVEL,
+                runtime_env=None,  # Important
+                
             )
 
         from ..manager.node_manager import NodeManager
