@@ -252,11 +252,13 @@ clone_or_reuse_repo() {
 
 install_common_embodied_deps() {
     uv sync --extra embodied --active
-    bash $SCRIPT_DIR/embodied/sys_deps.sh
+    # Use cluster-friendly dependency checker instead of installer
+    bash $SCRIPT_DIR/embodied/sys_deps_cluster.sh
     {
         echo "export NVIDIA_DRIVER_CAPABILITIES=all"
-        echo "export VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json"
-        echo "export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json"
+        echo "# Note: Vulkan driver files should be available system-wide on the cluster"
+        echo "# export VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json"
+        echo "# export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json"
     } >> "$VENV_DIR/bin/activate"
 }
 
@@ -385,7 +387,8 @@ install_env_only() {
         franka)
             uv sync --extra franka --active
             if [ "$SKIP_ROS" -ne 1 ]; then
-                bash $SCRIPT_DIR/embodied/ros_install.sh
+                echo "Warning: Skipping ROS installation on cluster. Please ensure ROS Noetic is available in your environment."
+                echo "You can set SKIP_ROS=1 to skip this warning."
                 install_franka_env
             fi
             ;;
@@ -466,9 +469,15 @@ install_robocasa_env() {
 install_franka_env() {
     # Install serl_franka_controller
     # Check if ROS_CATKIN_PATH is set or serl_franka_controllers is already built
-    set +euo pipefail
-    source /opt/ros/noetic/setup.bash
-    set -euo pipefail
+    # Note: Skipping ROS setup on cluster - assume ROS is available in user environment
+    echo "Warning: ROS Noetic should be available in your cluster environment"
+    echo "If ROS is not available, this installation will fail"
+    
+    # Check if ROS is available
+    if [ ! -f "$HOME/.local/opt/ros/noetic/setup.bash" ] && [ ! -f "/opt/ros/noetic/setup.bash" ]; then
+        echo "Warning: ROS Noetic not found in standard locations. Proceeding anyway..."
+    fi
+    
     ROS_CATKIN_PATH=$(realpath "$VENV_DIR/franka_catkin_ws")
     LIBFRANKA_VERSION=${LIBFRANKA_VERSION:-0.15.0}
     FRANKA_ROS_VERSION=${FRANKA_ROS_VERSION:-0.10.0}
@@ -495,12 +504,28 @@ install_franka_env() {
     if [ ! -f "$ROS_CATKIN_PATH/libfranka/build/libfranka.so" ]; then
         mkdir -p "$ROS_CATKIN_PATH/libfranka/build"
         pushd "$ROS_CATKIN_PATH/libfranka/build" >/dev/null
-        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/openrobots/lib/cmake -DBUILD_TESTS=OFF ..
+        # Use local installation paths instead of system paths
+        LOCAL_OPENROBOTS_PATH="$VENV_DIR/openrobots"
+        mkdir -p "$LOCAL_OPENROBOTS_PATH/lib/cmake"
+        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$LOCAL_OPENROBOTS_PATH/lib/cmake" -DBUILD_TESTS=OFF ..
         make -j$(nproc)
         popd >/dev/null
     fi
-    export LD_LIBRARY_PATH=$ROS_CATKIN_PATH/libfranka/build:/opt/openrobots/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=$ROS_CATKIN_PATH/libfranka/build:$LOCAL_OPENROBOTS_PATH/lib:$LD_LIBRARY_PATH
     export CMAKE_PREFIX_PATH=$ROS_CATKIN_PATH/libfranka/build:$CMAKE_PREFIX_PATH
+
+    # Try to source ROS from different possible locations
+    if [ -f "$HOME/.local/opt/ros/noetic/setup.bash" ]; then
+        set +euo pipefail
+        source "$HOME/.local/opt/ros/noetic/setup.bash"
+        set -euo pipefail
+    elif [ -f "/opt/ros/noetic/setup.bash" ]; then
+        set +euo pipefail
+        source /opt/ros/noetic/setup.bash
+        set -euo pipefail
+    else
+        echo "Warning: ROS setup script not found. Build may fail if ROS is not in PATH"
+    fi
 
     # Then franka_ros
     catkin_make -DCMAKE_BUILD_TYPE=Release -DFranka_DIR:PATH=$ROS_CATKIN_PATH/libfranka/build --pkg franka_ros
@@ -509,9 +534,18 @@ install_franka_env() {
     catkin_make -DCMAKE_CXX_STANDARD=17 --pkg serl_franka_controllers
     popd >/dev/null
 
-    echo "export LD_LIBRARY_PATH=$ROS_CATKIN_PATH/libfranka/build:/opt/openrobots/lib:\$LD_LIBRARY_PATH" >> "$VENV_DIR/bin/activate"
+    echo "export LD_LIBRARY_PATH=$ROS_CATKIN_PATH/libfranka/build:$LOCAL_OPENROBOTS_PATH/lib:\$LD_LIBRARY_PATH" >> "$VENV_DIR/bin/activate"
     echo "export CMAKE_PREFIX_PATH=$ROS_CATKIN_PATH/libfranka/build:\$CMAKE_PREFIX_PATH" >> "$VENV_DIR/bin/activate"
-    echo "source /opt/ros/noetic/setup.bash" >> "$VENV_DIR/bin/activate"
+    
+    # Try to add ROS setup to activate script with fallback
+    if [ -f "$HOME/.local/opt/ros/noetic/setup.bash" ]; then
+        echo "source $HOME/.local/opt/ros/noetic/setup.bash" >> "$VENV_DIR/bin/activate"
+    elif [ -f "/opt/ros/noetic/setup.bash" ]; then
+        echo "source /opt/ros/noetic/setup.bash" >> "$VENV_DIR/bin/activate"
+    else
+        echo "# Warning: ROS setup script not found - please source manually if needed" >> "$VENV_DIR/bin/activate"
+    fi
+    
     echo "source $ROS_CATKIN_PATH/devel/setup.bash" >> "$VENV_DIR/bin/activate"
 }
 
